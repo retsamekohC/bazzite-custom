@@ -1,0 +1,3 @@
+docker:
+  ghcr.io/retsamekohc/bazzite-custom:
+    use-sigstore-attachments: true

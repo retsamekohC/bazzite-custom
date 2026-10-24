@@ -5,23 +5,43 @@ set -ouex pipefail
 # Copy the contents of system_files/ of the git repo to /
 cp -avf "/ctx/system_files"/. /
 
-### Install packages
+### KDE Plasma from the Fedora KDE SIG staging COPR (ahead of Fedora updates)
 
-# Packages can be installed from any enabled yum repo on the image.
-# RPMfusion repos are available by default in ublue main images
-# List of rpmfusion packages can be found here:
-# https://mirrors.rpmfusion.org/mirrorlist?path=free/fedora/updates/43/x86_64/repoview/index.html&protocol=https&redirect=1
+KDE_REPO=kde-final
+KDE_URL="https://download.copr.fedorainfracloud.org/results/@kdesig/kde-final"
+KDE_OPTS=(
+    --repofrompath="${KDE_REPO},${KDE_URL}/fedora-$(rpm -E %fedora)-x86_64/"
+    --setopt="${KDE_REPO}.gpgcheck=1"
+    --setopt="${KDE_REPO}.gpgkey=${KDE_URL}/pubkey.gpg"
+    # COPR publishes SRPMs in the same repo; their build deps clash with Bazzite's mesa
+    --setopt="${KDE_REPO}.excludepkgs=*.src"
+)
 
-# this installs a package from fedora repos
-dnf5 install -y tmux
+# Bazzite versionlocks KDE and Qt; drop the locks for packages kde-final ships
+dnf5 repoquery "${KDE_OPTS[@]}" --repo="${KDE_REPO}" --qf '%{name}\n' | sort -u > /tmp/kde-final.txt
+mapfile -t locked < <(python3 - /tmp/kde-final.txt <<'EOF'
+import sys, tomllib
+ours = set(open(sys.argv[1]).read().split())
+locks = tomllib.load(open("/etc/dnf/versionlock.toml", "rb")).get("packages", [])
+print("\n".join(sorted({p["name"] for p in locks} & ours)))
+EOF
+)
+if (( ${#locked[@]} )); then
+    dnf5 versionlock delete "${locked[@]}"
+fi
 
-# Use a COPR Example:
-#
-# dnf5 -y copr enable ublue-os/staging
-# dnf5 -y install package
-# Disable COPRs so they don't end up enabled on the final image:
-# dnf5 -y copr disable ublue-os/staging
+dnf5 -y upgrade "${KDE_OPTS[@]}" --from-repo="${KDE_REPO}"
 
-#### Example for enabling a System Unit File
+# Fail the build if Plasma did not end up at the kde-final version
+want=$(dnf5 repoquery "${KDE_OPTS[@]}" --repo="${KDE_REPO}" --latest-limit=1 --qf '%{evr}' plasma-workspace)
+have=$(rpm -q --qf '%{EVR}' plasma-workspace)
+[[ "${have}" == "${want}" ]]
 
-systemctl enable podman.socket
+### Signature policy for this image
+
+jq '.transports.docker["ghcr.io/retsamekohc/bazzite-custom"] = [{
+        "type": "sigstoreSigned",
+        "keyPath": "/etc/pki/containers/retsamekohc-bazzite-custom.pub",
+        "signedIdentity": {"type": "matchRepository"}
+    }]' /etc/containers/policy.json > /tmp/policy.json
+cat /tmp/policy.json > /etc/containers/policy.json
